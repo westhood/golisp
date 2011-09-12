@@ -6,6 +6,9 @@ import (
 )
 
 type Context interface {
+    Bind(name string, val Expr) bool
+    Get(name string) (Expr, bool)
+    Set(name string, val Expr)
 }
 
 type Expr interface {
@@ -26,6 +29,44 @@ type List struct {
     next *List
 }
 
+// simple Context 
+type SimpleContext struct {
+    bindings map[string]Expr
+    pre Context
+}
+
+func (context *SimpleContext) Bind(name string, val Expr) bool {
+    if _, ok := (*context).bindings[name]; ok {
+        return false
+    }
+    (*context).bindings[name] = val
+    return true
+}
+
+func (context *SimpleContext) Get(name string) (val Expr , ok bool) {
+    if val, ok = (*context).bindings[name]; ok {
+        return
+    }
+
+    if (*context).pre != nil {
+        val, ok = (*context).pre.Get(name)
+        return
+    }
+
+    val, ok = nil, false
+    return
+}
+
+func (context *SimpleContext) Set(name string, val Expr) {
+    (*context).bindings[name] = val
+    return
+}
+
+
+func NewContext(context Context) Context {
+    return &SimpleContext{make(map[string]Expr), context}
+}
+
 func (list *List) Cons(value Expr) *List{
     newList := &List{value, list}
     return newList
@@ -42,7 +83,7 @@ func (list *List) Cdr() *List {
 func (list *List) String() string {
     sa := []string{}
     for l := list; l != nil; l = (*l).next {
-        sa = append(sa, fmt.Sprint((*l).value))
+        sa = append(sa, (*l).value.String())
     }
     return fmt.Sprintf("(%s)", strings.Join(sa, " "))
 }
@@ -58,6 +99,7 @@ func (list *List) Len() int {
 func (list *List) Eval(context Context) Expr {
     begin := (*list).value
     if form, ok := begin.(Atom); ok {
+        list = list.Cdr()
         switch string(form) {
             case "do": {
                 return list.DoEval(context)
@@ -65,13 +107,19 @@ func (list *List) Eval(context Context) Expr {
             case "if": {
                 return list.IfEval(context)
             }
+            case "let": {
+                return list.LetEval(context)
+            }
         }
     }
+
+    panic("Eval")
+    // can't be here
     return nil
 }
 
 func (list *List) DoEval(context Context) Expr {
-    seq := list.Cdr()
+    seq := list
     if seq == nil {
         return nil
     }
@@ -86,22 +134,20 @@ func (list *List) DoEval(context Context) Expr {
 }
 
 func (list *List) IfEval(context Context) Expr {
-    if list.Len() != 4 {
+    if list.Len() != 3 {
         panic(fmt.Sprintf(
                 "If Syntax Error: length of If form is %d",
                 list.Len()))
     }
 
-    l := list.Cdr()
-    first := l.Car()
+    l := list
+    first := l.Car() // pred
     l = l.Cdr()
     second := l.Car() // true branch
     l = l.Cdr()
     third := l.Car() // false branch
 
-    pred := first.Eval(context)
-
-    if bPred, ok := pred.(Boolean); ok {
+    if bPred, ok := (first.Eval(context)).(Boolean); ok {
         if bPred.Bool() {
             return second.Eval(context)
         } else {
@@ -113,6 +159,42 @@ func (list *List) IfEval(context Context) Expr {
 
     // can't be here
     return nil
+}
+
+// (let [bindings] body)
+func (list *List) LetEval(context Context) Expr {
+    if list.Len() < 2 {
+        panic(fmt.Sprintf(
+                "Let Syntax Error: length of Let form is %d",
+                list.Len()))
+    }
+    l := list
+
+    var (
+        binding Vector
+        ok bool
+    )
+
+    if binding, ok = l.Car().(Vector); !ok {
+         panic(fmt.Sprintf("Let Syntax Error: let requires a vector for its binding"))
+    }
+    if binding.Len() % 2 != 0 {
+         panic(fmt.Sprintf("Let Syntax Error: let requires an even number of forms in binding vector"))
+    }
+    body := l.Cdr()
+
+    newContext := NewContext(context)
+    n := binding.Len()
+    for i := 0; i < n/2 ; i++ {
+        if name, ok := binding[2*i].(Atom); ok {
+            val := binding[2*i+1].Eval(context)
+            newContext.Bind(name.String(), val)
+        } else {
+            panic(fmt.Sprintf("Let Syntax Error: unsupported binding form"))
+        }
+    }
+
+    return body.DoEval(newContext)
 }
 
 func ArrayToList(array []Expr) *List {
@@ -127,6 +209,29 @@ func ArrayToList(array []Expr) *List {
     return l
 }
 
+
+// Vector
+type Vector []Expr
+
+func (v Vector) Eval(context Context) Expr {
+    val := []Expr{}
+    for _, i := range v {
+        val = append(val, i.Eval(context))
+    }
+    return Vector(val)
+}
+
+func (v Vector) Len() int {
+    return len(v)
+}
+
+func (v Vector) String() string {
+    sa := []string{}
+    for _, i := range v {
+        sa = append(sa, i.String())
+    }
+    return fmt.Sprintf("[%s]", strings.Join(sa, " "))
+}
 
 // Int
 type IntExpr int
@@ -166,8 +271,9 @@ func (atom Atom) String() string {
     return string(atom)
 }
 
-func (atom Atom) Eval(_ Context) Expr {
-    return atom
+func (atom Atom) Eval(context Context) Expr {
+    val, _ := context.Get(string(atom))
+    return val
 }
 
 
